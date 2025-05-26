@@ -421,7 +421,7 @@ class TradingDashboard:
             
             return html.P(f"No {agent_type} agent found")
     
-    def run(self, debug=False):
+    def run(self, debug=False, host='127.0.0.1'):
         """
         Run the dashboard.
         
@@ -429,4 +429,5 @@ class TradingDashboard:
             debug: Whether to run in debug mode
         """
         # Fixed: Changed run_server to run to match newer Dash API
-        self.app.run(debug=debug, port=self.port)
+        # self.app.run(debug=debug, port=self.port)
+        self.app.run(debug=debug, host=host)
