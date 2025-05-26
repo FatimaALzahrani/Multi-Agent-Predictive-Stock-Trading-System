@@ -1,9 +1,3 @@
-"""
-Dashboard Module for Multi-Agent Trading System
-
-This module implements an interactive dashboard for visualizing the trading system.
-"""
-
 import dash
 from dash import dcc, html, Input, Output, State, callback
 import dash_bootstrap_components as dbc
@@ -15,38 +9,18 @@ from typing import Dict, List, Any
 
 
 class TradingDashboard:
-    """
-    Interactive dashboard for visualizing the multi-agent trading system.
-    
-    Attributes:
-        market: Market environment instance
-        app: Dash application instance
-        port: Port to run the dashboard on
-    """
     
     def __init__(self, market, port=8050):
-        """
-        Initialize the dashboard.
-        
-        Args:
-            market: Market environment instance
-            port: Port to run the dashboard on
-        """
         self.market = market
         self.port = port
+        self.simulation_running = False
         
-        # Initialize Dash app
         self.app = dash.Dash(__name__, external_stylesheets=[dbc.themes.DARKLY])
         
-        # Set up the layout
         self._setup_layout()
-        
-        # Set up callbacks
         self._setup_callbacks()
-        self.app = dash.Dash(__name__) 
     
     def _setup_layout(self):
-        """Set up the dashboard layout."""
         self.app.layout = dbc.Container([
             dbc.Row([
                 dbc.Col([
@@ -141,172 +115,225 @@ class TradingDashboard:
                 ], width=12)
             ]),
             
-            # Store components for data
-            dcc.Store(id="market-data-store"),
-            dcc.Store(id="agent-data-store"),
+            dcc.Store(id="market-data-store", data={}),
+            dcc.Store(id="agent-data-store", data={}),
+            dcc.Store(id="simulation-state", data={"running": False, "step": 0}),
             dcc.Interval(id="simulation-interval", interval=1000, n_intervals=0, disabled=True)
         ], fluid=True, className="mt-4")
     
     def _setup_callbacks(self):
-        """Set up the dashboard callbacks."""
         
         @self.app.callback(
-            Output("simulation-interval", "disabled"),
-            Output("simulation-status", "children"),
-            Input("start-button", "n_clicks"),
-            Input("pause-button", "n_clicks"),
-            Input("reset-button", "n_clicks"),
-            State("simulation-interval", "disabled"),
+            [Output("simulation-interval", "disabled"),
+             Output("simulation-status", "children"),
+             Output("simulation-state", "data")],
+            [Input("start-button", "n_clicks"),
+             Input("pause-button", "n_clicks"),
+             Input("reset-button", "n_clicks")],
+            [State("simulation-interval", "disabled"),
+             State("simulation-state", "data")],
             prevent_initial_call=True
         )
-        def control_simulation(start_clicks, pause_clicks, reset_clicks, is_disabled):
+        def control_simulation(start_clicks, pause_clicks, reset_clicks, is_disabled, sim_state):
             ctx = dash.callback_context
             if not ctx.triggered:
-                return is_disabled, "Simulation not started"
+                return is_disabled, "Simulation not started", sim_state
             
             button_id = ctx.triggered[0]["prop_id"].split(".")[0]
             
             if button_id == "start-button":
-                return False, "Simulation running"
+                new_state = sim_state.copy()
+                new_state["running"] = True
+                return False, "Simulation running", new_state
             elif button_id == "pause-button":
-                return True, "Simulation paused"
+                new_state = sim_state.copy()
+                new_state["running"] = False
+                return True, "Simulation paused", new_state
             elif button_id == "reset-button":
-                self.market.reset()
-                return True, "Simulation reset"
+                try:
+                    self.market.reset()
+                    new_state = {"running": False, "step": 0}
+                    return True, "Simulation reset", new_state
+                except Exception as e:
+                    return True, f"Reset failed: {str(e)}", sim_state
             
-            return is_disabled, "Simulation status unknown"
+            return is_disabled, "Simulation status unknown", sim_state
         
         @self.app.callback(
             Output("simulation-interval", "interval"),
             Input("simulation-speed", "value")
         )
         def update_interval(speed):
-            # Convert speed (1-10) to interval in ms (2000-200)
-            return 2200 - (speed * 200)
+            return max(200, 2200 - (speed * 200))
         
         @self.app.callback(
-            Output("market-data-store", "data"),
-            Output("agent-data-store", "data"),
-            Input("simulation-interval", "n_intervals")
+            [Output("market-data-store", "data"),
+             Output("agent-data-store", "data")],
+            [Input("simulation-interval", "n_intervals")],
+            [State("simulation-state", "data"),
+             State("market-data-store", "data"),
+             State("agent-data-store", "data")],
+            prevent_initial_call=True
         )
-        def update_simulation(n_intervals):
-            # Run one step of the simulation
-            step_result = self.market.step()
+        def update_simulation(n_intervals, sim_state, current_market_data, current_agent_data):
+            if not sim_state.get("running", False):
+                return current_market_data or {}, current_agent_data or {}
             
-            # Get agent performance
-            agent_performance = self.market.get_agent_performance()
-            
-            # Return updated data
-            return step_result, agent_performance
+            try:
+                step_result = self.market.step()
+                agent_performance = self.market.get_agent_performance()
+                
+                if step_result:
+                    step_result["step"] = n_intervals
+                
+                return step_result or {}, agent_performance or {}
+                
+            except Exception as e:
+                print(f"Error in simulation step: {e}")
+                return current_market_data or {}, current_agent_data or {}
         
         @self.app.callback(
             Output("market-graph", "figure"),
-            Input("market-data-store", "data")
+            Input("market-data-store", "data"),
+            prevent_initial_call=True
         )
         def update_market_graph(market_data):
-            if not market_data:
-                # Return empty figure if no data
-                return go.Figure()
-            
-            # Create figure with price data
             fig = go.Figure()
             
-            # Get historical window for display
-            historical_data = self.market.get_historical_window(30)
-            
-            # Check if historical_data is empty or doesn't have the required column
-            if historical_data.empty or 'symbol' not in historical_data.columns:
+            try:
+                historical_data = self.market.get_historical_window(30)
+                
+                if historical_data is None or historical_data.empty:
+                    fig.update_layout(
+                        title="No market data available",
+                        template="plotly_dark",
+                        xaxis_title="Date",
+                        yaxis_title="Price"
+                    )
+                    return fig
+                
+                if 'symbol' not in historical_data.columns:
+                    fig.update_layout(
+                        title="Invalid market data format",
+                        template="plotly_dark"
+                    )
+                    return fig
+                
+                for symbol in self.market.symbols:
+                    symbol_data = historical_data[historical_data['symbol'] == symbol]
+                    
+                    if not symbol_data.empty and 'close' in symbol_data.columns:
+                        fig.add_trace(go.Scatter(
+                            x=symbol_data.get('date', range(len(symbol_data))),
+                            y=symbol_data['close'],
+                            mode='lines',
+                            name=symbol,
+                            line=dict(width=2)
+                        ))
+                
                 fig.update_layout(
-                    title="No market data available",
+                    title="Stock Prices",
+                    xaxis_title="Date",
+                    yaxis_title="Price ($)",
+                    template="plotly_dark",
+                    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                    hovermode='x unified'
+                )
+                
+            except Exception as e:
+                print(f"Error updating market graph: {e}")
+                fig.update_layout(
+                    title=f"Error loading market data: {str(e)}",
                     template="plotly_dark"
                 )
-                return fig
-            
-            # Group by symbol and date
-            for symbol in self.market.symbols:
-                symbol_data = historical_data[historical_data['symbol'] == symbol]
-                
-                if not symbol_data.empty:
-                    fig.add_trace(go.Scatter(
-                        x=symbol_data['date'],
-                        y=symbol_data['close'],
-                        mode='lines',
-                        name=symbol
-                    ))
-            
-            fig.update_layout(
-                title="Stock Prices",
-                xaxis_title="Date",
-                yaxis_title="Price",
-                template="plotly_dark",
-                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
-            )
             
             return fig
         
         @self.app.callback(
             Output("performance-graph", "figure"),
-            Input("agent-data-store", "data")
+            Input("agent-data-store", "data"),
+            prevent_initial_call=True
         )
         def update_performance_graph(agent_data):
-            if not agent_data:
-                # Return empty figure if no data
-                return go.Figure()
-            
-            # Create figure with agent performance data
             fig = go.Figure()
             
-            # Add bar for each agent's return
-            agents = list(agent_data.keys())
-            returns = [agent_data[agent]['total_return'] * 100 for agent in agents]
-            
-            fig.add_trace(go.Bar(
-                x=agents,
-                y=returns,
-                text=[f"{ret:.2f}%" for ret in returns],
-                textposition='auto'
-            ))
-            
-            fig.update_layout(
-                title="Agent Performance (Return %)",
-                xaxis_title="Agent",
-                yaxis_title="Return (%)",
-                template="plotly_dark"
-            )
+            try:
+                if not agent_data:
+                    fig.update_layout(
+                        title="No agent performance data",
+                        template="plotly_dark"
+                    )
+                    return fig
+                
+                agents = list(agent_data.keys())
+                returns = []
+                
+                for agent in agents:
+                    agent_info = agent_data[agent]
+                    if isinstance(agent_info, dict) and 'total_return' in agent_info:
+                        returns.append(agent_info['total_return'] * 100)
+                    else:
+                        returns.append(0)
+                
+                colors = ['green' if r >= 0 else 'red' for r in returns]
+                
+                fig.add_trace(go.Bar(
+                    x=agents,
+                    y=returns,
+                    text=[f"{ret:.2f}%" for ret in returns],
+                    textposition='auto',
+                    marker_color=colors
+                ))
+                
+                fig.update_layout(
+                    title="Agent Performance (Return %)",
+                    xaxis_title="Agent",
+                    yaxis_title="Return (%)",
+                    template="plotly_dark"
+                )
+                
+            except Exception as e:
+                print(f"Error updating performance graph: {e}")
+                fig.update_layout(
+                    title=f"Error loading performance data: {str(e)}",
+                    template="plotly_dark"
+                )
             
             return fig
         
         @self.app.callback(
             Output("agent-actions-graph", "figure"),
-            Input("market-data-store", "data")
+            Input("market-data-store", "data"),
+            prevent_initial_call=True
         )
         def update_actions_graph(market_data):
-            if not market_data or 'agent_actions' not in market_data:
-                # Return empty figure if no data
-                return go.Figure()
-            
-            # Create figure with agent actions
             fig = go.Figure()
             
-            # Get agent actions from market history
-            if self.market.market_history:
-                # Get the last 10 market states
-                recent_history = self.market.market_history[-10:]
+            try:
+                if not hasattr(self.market, 'market_history') or not self.market.market_history:
+                    fig.update_layout(
+                        title="No action history available",
+                        template="plotly_dark"
+                    )
+                    return fig
                 
-                # Count buy/sell actions for each agent
+                recent_history = self.market.market_history[-10:] if len(self.market.market_history) >= 10 else self.market.market_history
+                
                 agent_ids = [agent.agent_id for agent in self.market.agents]
                 buy_counts = {agent_id: 0 for agent_id in agent_ids}
                 sell_counts = {agent_id: 0 for agent_id in agent_ids}
                 
                 for state in recent_history:
-                    for agent_id, actions in state.get('agent_actions', {}).items():
-                        for symbol, action_data in actions.items():
-                            if action_data['action'] == 'buy':
-                                buy_counts[agent_id] += 1
-                            elif action_data['action'] == 'sell':
-                                sell_counts[agent_id] += 1
+                    if 'agent_actions' in state:
+                        for agent_id, actions in state['agent_actions'].items():
+                            if isinstance(actions, dict):
+                                for symbol, action_data in actions.items():
+                                    if isinstance(action_data, dict) and 'action' in action_data:
+                                        if action_data['action'] == 'buy':
+                                            buy_counts[agent_id] += 1
+                                        elif action_data['action'] == 'sell':
+                                            sell_counts[agent_id] += 1
                 
-                # Create grouped bar chart
                 fig.add_trace(go.Bar(
                     x=agent_ids,
                     y=[buy_counts[agent_id] for agent_id in agent_ids],
@@ -322,112 +349,170 @@ class TradingDashboard:
                 ))
                 
                 fig.update_layout(
-                    title="Recent Agent Actions",
+                    title="Recent Agent Actions (Last 10 Steps)",
                     xaxis_title="Agent",
-                    yaxis_title="Count",
+                    yaxis_title="Action Count",
                     barmode='group',
                     template="plotly_dark",
                     legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+                )
+                
+            except Exception as e:
+                print(f"Error updating actions graph: {e}")
+                fig.update_layout(
+                    title=f"Error loading action data: {str(e)}",
+                    template="plotly_dark"
                 )
             
             return fig
         
         @self.app.callback(
             Output("portfolio-graph", "figure"),
-            Input("agent-data-store", "data")
+            Input("agent-data-store", "data"),
+            prevent_initial_call=True
         )
         def update_portfolio_graph(agent_data):
-            if not agent_data:
-                # Return empty figure if no data
-                return go.Figure()
-            
-            # Create figure with portfolio composition
             fig = go.Figure()
             
-            # For demonstration, show a simple portfolio breakdown for the first agent
-            if self.market.agents:
-                agent = self.market.agents[0]
-                portfolio = agent.portfolio
+            try:
+                if not self.market.agents:
+                    fig.update_layout(
+                        title="No agents available",
+                        template="plotly_dark"
+                    )
+                    return fig
                 
-                if portfolio:
-                    labels = list(portfolio.keys())
-                    values = [portfolio[symbol] * self.market.current_prices.get(symbol, 0) for symbol in labels]
-                    
-                    # Add cash as well
+                agent = self.market.agents[0]
+                
+                labels = []
+                values = []
+                
+                if hasattr(agent, 'portfolio') and agent.portfolio:
+                    for symbol, quantity in agent.portfolio.items():
+                        if quantity > 0:
+                            current_price = getattr(self.market, 'current_prices', {}).get(symbol, 0)
+                            value = quantity * current_price
+                            if value > 0:
+                                labels.append(f"{symbol} ({quantity} shares)")
+                                values.append(value)
+                
+                if hasattr(agent, 'cash') and agent.cash > 0:
                     labels.append('Cash')
                     values.append(agent.cash)
-                    
-                    fig.add_trace(go.Pie(
-                        labels=labels,
-                        values=values,
-                        hole=.3
-                    ))
-                    
-                    fig.update_layout(
-                        title=f"Portfolio Composition - {agent.name}",
-                        template="plotly_dark"
-                    )
-                else:
-                    # Only cash
-                    fig.add_trace(go.Pie(
-                        labels=['Cash'],
-                        values=[agent.cash],
-                        hole=.3
-                    ))
-                    
-                    fig.update_layout(
-                        title=f"Portfolio Composition - {agent.name} (Cash Only)",
-                        template="plotly_dark"
-                    )
+                
+                if not labels:
+                    labels = ['No Holdings']
+                    values = [1]
+                
+                fig.add_trace(go.Pie(
+                    labels=labels,
+                    values=values,
+                    hole=.3,
+                    textinfo='label+percent',
+                    textposition='auto'
+                ))
+                
+                fig.update_layout(
+                    title=f"Portfolio Composition - {getattr(agent, 'name', 'Unknown Agent')}",
+                    template="plotly_dark"
+                )
+                
+            except Exception as e:
+                print(f"Error updating portfolio graph: {e}")
+                fig.update_layout(
+                    title=f"Error loading portfolio data: {str(e)}",
+                    template="plotly_dark"
+                )
             
             return fig
         
         @self.app.callback(
             Output("agent-details-content", "children"),
-            Input("agent-tabs", "active_tab"),
-            Input("agent-data-store", "data")
+            [Input("agent-tabs", "active_tab")],
+            [State("agent-data-store", "data")],
+            prevent_initial_call=True
         )
         def update_agent_details(active_tab, agent_data):
-            if not agent_data:
-                return html.P("No agent data available")
-            
-            # Find the agent based on the active tab
-            agent_type = active_tab.split("-")[1]  # Extract agent type from tab ID
-            
-            for agent in self.market.agents:
-                if agent_type in agent.agent_id:
-                    # Create a details panel for the selected agent
-                    metrics = agent.performance_metrics
-                    
-                    return html.Div([
-                        html.H4(agent.name),
-                        html.P(f"Agent ID: {agent.agent_id}"),
-                        html.P(f"Cash: ${agent.cash:.2f}"),
-                        html.P(f"Portfolio Value: ${sum([agent.portfolio.get(symbol, 0) * self.market.current_prices.get(symbol, 0) for symbol in agent.portfolio]):.2f}"),
-                        html.P(f"Total Return: {metrics['total_return'] * 100:.2f}%"),
-                        html.P(f"Trades Count: {metrics['trades_count']}"),
-                        
-                        html.H5("Recent Transactions", className="mt-3"),
-                        html.Div([
-                            dbc.Table.from_dataframe(
-                                pd.DataFrame(agent.transaction_history[-5:]) if agent.transaction_history else pd.DataFrame(),
-                                striped=True,
-                                bordered=True,
-                                hover=True,
-                                size="sm"
-                            )
+            try:
+                if not active_tab:
+                    return html.P("Select an agent tab to view details")
+                
+                agent_type = active_tab.split("-")[1] if "-" in active_tab else ""
+                
+                target_agent = None
+                for agent in self.market.agents:
+                    if agent_type.lower() in agent.agent_id.lower():
+                        target_agent = agent
+                        break
+                
+                if not target_agent:
+                    return html.P(f"No {agent_type} agent found")
+                
+                try:
+                    metrics = getattr(target_agent, 'performance_metrics', {})
+                except:
+                    metrics = {}
+                
+                portfolio_value = 0
+                try:
+                    if hasattr(target_agent, 'portfolio') and target_agent.portfolio:
+                        current_prices = getattr(self.market, 'current_prices', {})
+                        portfolio_value = sum([
+                            target_agent.portfolio.get(symbol, 0) * current_prices.get(symbol, 0)
+                            for symbol in target_agent.portfolio
                         ])
+                except:
+                    portfolio_value = 0
+                
+                details = [
+                    html.H4(getattr(target_agent, 'name', 'Unknown Agent')),
+                    html.P(f"Agent ID: {target_agent.agent_id}"),
+                    html.P(f"Cash: ${getattr(target_agent, 'cash', 0):.2f}"),
+                    html.P(f"Portfolio Value: ${portfolio_value:.2f}"),
+                    html.P(f"Total Value: ${getattr(target_agent, 'cash', 0) + portfolio_value:.2f}")
+                ]
+                
+                if metrics:
+                    details.extend([
+                        html.P(f"Total Return: {metrics.get('total_return', 0) * 100:.2f}%"),
+                        html.P(f"Trades Count: {metrics.get('trades_count', 0)}")
                     ])
-            
-            return html.P(f"No {agent_type} agent found")
+                
+                details.append(html.H5("Recent Transactions", className="mt-3"))
+                
+                try:
+                    if hasattr(target_agent, 'transaction_history') and target_agent.transaction_history:
+                        recent_transactions = target_agent.transaction_history[-5:]
+                        if recent_transactions:
+                            df = pd.DataFrame(recent_transactions)
+                            details.append(
+                                dbc.Table.from_dataframe(
+                                    df,
+                                    striped=True,
+                                    bordered=True,
+                                    hover=True,
+                                    size="sm"
+                                )
+                            )
+                        else:
+                            details.append(html.P("No recent transactions"))
+                    else:
+                        details.append(html.P("No transaction history available"))
+                except Exception as e:
+                    details.append(html.P(f"Error loading transactions: {str(e)}"))
+                
+                return html.Div(details)
+                
+            except Exception as e:
+                return html.P(f"Error loading agent details: {str(e)}")
     
     def run(self, debug=False, host='127.0.0.1'):
-        """
-        Run the dashboard.
-        
-        Args:
-            debug: Whether to run in debug mode
-        """
-        # Fixed: Changed run_server to run to match newer Dash API
-        # self.app.run(debug=debug, port=self.port)
-        self.app.run(debug=debug, host=host)
+        try:
+            self.app.run(debug=debug, host=host, port=self.port)
+        except Exception as e:
+            print(f"Error starting dashboard: {e}")
+            try:
+                self.app.run_server(debug=debug, host=host, port=self.port)
+            except Exception as e2:
+                print(f"Error with fallback method: {e2}")
+                raise e
