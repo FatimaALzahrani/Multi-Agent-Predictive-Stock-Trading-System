@@ -82,7 +82,8 @@ def main():
     # Create and run dashboard
     print("Starting dashboard...")
     dashboard = TradingDashboard(market=market, port=8050)
-    dashboard.run(debug=True)
+    dashboard.run(debug=True, host='0.0.0.0')
+
 
 
 if __name__ == "__main__":
