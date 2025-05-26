@@ -43,6 +43,7 @@ class TradingDashboard:
         
         # Set up callbacks
         self._setup_callbacks()
+        self.app = dash.Dash(__name__) 
     
     def _setup_layout(self):
         """Set up the dashboard layout."""
